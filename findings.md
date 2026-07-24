@@ -61,12 +61,26 @@ JS `Date` is only valid within ±8.64e15 ms, so any timestamp ≥ **8 640 000 00
 `ts*1000` exceed the range and `new Date(...).toISOString()` throws `RangeError: Invalid time value`.
 Verified empirically in node (see scratchpad/date_crash.js): ts=8640000000000 OK, ts=8640000000001 THROWS.
 
-**Reachability / impact:** the throwing block is NOT wrapped in try/catch (only `metadata.parse_file`
-is). `getAppDataForAppId` is called from `getAll()` (`applications.js:376`) inside a `.map`, which is
-called from `window.js:147 _setupApplications()` (also no try/catch) during window construction, and
-from `appInfoViewer._setup()`. A single malicious app therefore makes `getAll()` throw → the app list
-never builds → **Flatseal fails to open / crashes**, and stays broken until the malicious app is
-uninstalled (persistent DoS). One malicious app also poisons enumeration of ALL apps.
+**Input is attacker-controlled & unclamped:** verified in AppStream source — the XML `timestamp`
+attribute is parsed with a bare `atol()` into a guint64 with NO range-clamping
+(`as-release.c:926-928`), and `get_timestamp()` returns it raw. So `<release timestamp="…">` in the
+malicious app's bundle directly controls `ts`.
+
+**Reachability / impact (corrected — NOT a SIGABRT):** the throwing block is NOT wrapped in try/catch
+(only `metadata.parse_file` is). `getAppDataForAppId` is called from `getAll()` (`applications.js:375`)
+inside a `.map` that iterates EVERY installed app, called from `window.js:147 _setupApplications()` (no
+try/catch) ← `_setup` ← `_init` ← `new FlatsealWindow()` in `application.js:107 vfunc_activate`.
+
+IMPORTANT accuracy note: this GNOME 50 / GJS runtime does NOT hard-crash on an uncaught JS exception.
+GJS catches exceptions at every C→JS boundary (vfuncs, signal handlers, timeout/idle callbacks), logs
+`JS ERROR: RangeError…` at `G_LOG_LEVEL_CRITICAL`, and continues (verified in gjs source:
+`gi/function.cpp:380-404`, `gi/value.cpp:393-406`, `gjs/jsapi-util.cpp:556-605`; a CRITICAL is fatal only
+under `G_DEBUG=fatal-criticals`, which the GNOME Platform runtime does not set). So the concrete outcome
+is: `vfunc_activate` throws → logged → `this._window` stays `null` → `present()` never runs → **no window
+is created; the GtkApplication has no windows and `run()` exits.** i.e. a **persistent, windowless startup
+denial-of-service on Flatseal itself** — every launch fails to show a usable window, so the user cannot
+manage the permissions of ANY app, for as long as the malicious app is installed. One malicious app
+poisons enumeration of ALL apps. This is a functional DoS of the security tool, not a process crash.
 
 Minimal payload (metainfo.xml): `<releases><release version="1.0" timestamp="9999999999999999"/></releases>`.
 
@@ -83,10 +97,17 @@ try { data.runtime = keyFile.get_value(group, 'runtime'); } catch (err) { ... }
 A malicious app's `metadata` file with invalid GLib KeyFile syntax (e.g. a bare line `garbage`) makes
 `load_from_file` throw `G_KEY_FILE_ERROR_PARSE`. `permissions.js:163` wraps the identical call in
 try/catch precisely because it throws; this one doesn't. Reached from `appInfoViewer._setup`
-(`appInfoViewer.js:76`) via `window.js:308` inside the `row-activated` signal handler → crashes when the
-user selects the malicious app (does not break the whole list like C1). Same root class as C1.
-`_parseCustomInstallation` (`applications.js:124`) has the same unguarded call but its files live in
-system config, not attacker-controlled.
+(`appInfoViewer.js:76`) via `window.js:308` inside the `row-activated` signal handler (never on startup —
+`getAll()` doesn't call `getMetadataForAppId`).
+
+**Severity DOWNGRADED to LOW** (adversarial review): (1) like C1, the throw is caught-and-logged by GJS in
+the signal-handler boundary — NOT a process crash — so the only effect is the info panel's runtime label
+fails to populate for that one row + a logged `JS ERROR`; the app keeps running. (2) Reachability is
+questionable: Flatpak itself parses this same `metadata` with GKeyFile at install/deploy time, so a file
+that GLib KeyFile rejects would generally also fail Flatpak's own validation, making it hard to have a
+malformed `metadata` on a legitimately installed app. Real hardening gap (asymmetric missing guard),
+low practical impact. `_parseCustomInstallation` (`applications.js:124`) has the same unguarded call but
+its files live in system config, not attacker-controlled.
 
 ### C3 — `launchable` path traversal → arbitrary file read parsed as desktop entry (CONFIRMED, sandbox-bounded)
 
