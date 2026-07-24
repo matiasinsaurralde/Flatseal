@@ -1,6 +1,22 @@
 # Flatseal Zero-Day Analysis — Findings
 
-Status: IN PROGRESS (started 2026-07-24)
+Status: PRIMARY CHAIN CONFIRMED (2026-07-24). Investigation broad + deep (8 parallel agent lines across
+9 approach families; key claims reproduced independently and adversarially re-verified; core deps
+libappstream/libxml2/GKeyFile/glycin tested against the real libraries).
+
+## Findings summary
+
+| ID | Finding | Impact | Verdict |
+|----|---------|--------|---------|
+| ★ **E1** (+N1/N2/N3) | `filesystemsOther` diff `negate()`s a *removed deny* into a positive filesystem GRANT | **Privilege escalation → sandbox escape → arbitrary command execution** | CONFIRMED (3 independent repros) |
+| **C1** | AppStream `<release timestamp>` overflow → uncaught `RangeError` in `getAll()` | Persistent windowless startup DoS (Flatseal won't open) | CONFIRMED |
+| **C4** | Unbounded read of attacker-controlled launchable/appdata file | Memory-exhaustion startup DoS | CONFIRMED |
+| **R1** | Monitor-driven reload races the debounced save | Silently drops the user's revocation | CONFIRMED logic / PLAUSIBLE exploit |
+| **C3** | `launchable` AppStream string → unsanitized `build_filenamev` | Bounded path-traversal file read | CONFIRMED (low) |
+| **C2** | Missing try/catch on malformed `metadata` load | Info-panel row fails to populate | CONFIRMED (low) |
+| **F-ENV** | `[Environment]` value `A=x;B=y` split-laundered into 2 vars | Env-var laundering, same app | CONFIRMED (low) |
+| — | icon hard-crash; AppStream XXE/entity-bomb/desktop-parse; KeyFile write-injection; all ReDoS; Pango markup; cross-key injection; appId traversal; bus/env/shared/persistent escalation; portals/D-Bus | — | REFUTED (evidence-backed) |
+
 
 ## TL;DR — the surviving chain
 
@@ -145,9 +161,31 @@ EVERY other app's override (e.g. inject `[Environment] LD_PRELOAD=…` or `files
 code execution in other apps. So E1 chains from "override permissions" all the way to "running arbitrary
 commands."
 
-**Fix:** in `removedOriginals` add `.filter(p => !this.constructor.isOverriden(this._overrides, p))` and
-skip the `negate` mapping when `isNegated(p)` (removing a metadata self-negation should CLEAR the entry,
-never grant it).
+**Variants — same root defect (`.map(removeMode).map(negate)` on removed negated entries), all reproduced:**
+- **N1 (mode-stripping amplification, HIGH):** metadata `!X:ro` + override `!X:ro` (modes need NOT match —
+  `isOverriden` ignores mode). Same weak trigger as E1 (any unrelated edit; the pair hides the row), but
+  `removeMode` strips `:ro` *before* `negate`, so a deny-even-read-only becomes a bare read-WRITE grant `X`.
+  Strictly worse outcome, broader arming set.
+- **N2 (metadata-ONLY, no user override needed, HIGH):** attacker metadata `!X` alone. User removes/edits
+  the visible "Can't read: X" row → `removedOriginals` fires → grant `X`. This is the one-step arming above,
+  generalized: it drops the "user already has an `!X` override" precondition entirely — a single malicious
+  app shipping `filesystems=!X` suffices.
+- **N3 (GLOBAL-only negation → per-app grant, MEDIUM-HIGH):** user's global `!X` (deny X for all apps),
+  with the row removed from one app's list, is converted by the `removedGlobals` path (136-143) into a
+  per-app positive `X` grant (which wins over the global deny in flatpak precedence). The `removedGlobals`
+  guard closes the metadata+global PAIR but not the global-ONLY case.
+
+**Unifying fix (closes E1 + N1 + N2 + N3):** in BOTH `removedOriginals` (133-134) and `removedGlobals`
+(142-143), skip the `negate` mapping when `isNegated(p)` — a removed *deny* must revert to the
+metadata/global deny, never become a grant; removing a positive grant `X` still correctly yields `!X`
+(`isNegated('X')===false`, unaffected). Add `.filter(p => !isOverriden(this._overrides, p))` on
+`removedOriginals` as secondary hardening to stop the pair-hiding at the source.
+
+**Sub-variants that do NOT flip (guarded):** `:reset` overrides are displayed (not hidden) via the
+`&& !isResetOverride(p)` filters, so they stay in `paths` and are skipped; the metadata+GLOBAL pair is
+mutually cross-guarded (`removedOriginals` has `!isOverriden(this._globals,p)`, `removedGlobals` has
+`!isOverriden(this._originals,p)`); a `_filesystems` (host/home) override is closed by the
+`!isOverriden(this._filesystems.overrides,p)` guard.
 
 ### C1 — DoS: malicious AppStream release timestamp crashes Flatseal on startup (CONFIRMED)
 
@@ -368,6 +406,18 @@ VAR_REGEXP to forbid `;` in values, or don't split values.
   with `<!ENTITY xxe SYSTEM "file:///…">` yields empty content and strace shows ZERO file/socket access.
   Internal entities substitute (attacker's own literal text only). `<name>&xxe;</name>` does not leak
   files.
+- **Sibling escalation in bus / env / shared / persistent models — REFUTED (structural guards).**
+  * `sessionBus`/`systemBus`: fuzzed all 64 (metadata×global×override) states over {absent,talk,own,none}
+    ×edits×rounds → ZERO `own`/`talk` grants fabricated, no `none`→`own/talk` flip. The removed/preserve
+    paths only ever write the literal string `'none'`; there is NO symmetric `negate()`. Owning a
+    dangerous name (`org.freedesktop.Flatpak`, `systemd1`) cannot be manufactured by re-derivation.
+  * `variables`: fuzzed incl. the v2-metadata-drops-K reload → ZERO `LD_PRELOAD` resurrections. The
+    "removed original" and "preserve previously negated" blocks only assign `''` (unset) — the safe
+    direction, no flip. Non-empty values come solely from the user-edited displayed map.
+  * `shared` (host/home/network/sockets/…): 27-state round-trip fuzz → no grant fabricated; the override
+    is derived from the boolean `value` with a `fromOriginals` early-return, no `negate()`-on-removed.
+  * `persistent`: no `!` negation semantics; removing an original persists nothing. Not representable.
+  The negate-symmetry escalation is UNIQUE to `filesystemsOther` (E1/N1/N2/N3).
 - **AppStream entity-bomb / deep-nesting / huge-node DoS — REFUTED.** libxml2 2.9.14 defaults
   (no `XML_PARSE_HUGE`) reject the billion-laughs bomb ("entity reference loop"), cap depth at 256, and
   cap node size ("Huge input lookup") — all clean GErrors, no OOM/stack-overflow.
