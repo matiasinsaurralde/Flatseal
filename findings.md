@@ -70,6 +70,58 @@ uninstalled (persistent DoS). One malicious app also poisons enumeration of ALL 
 
 Minimal payload (metainfo.xml): `<releases><release version="1.0" timestamp="9999999999999999"/></releases>`.
 
+### C2 — DoS: unguarded `load_from_file` on malformed `metadata` crashes when app is opened (CONFIRMED)
+
+**File:** `src/models/applications.js:246-247` (`getMetadataForAppId`)
+
+```js
+const keyFile = new GLib.KeyFile();
+keyFile.load_from_file(path, 0);   // <-- NOT wrapped; only the following get_value is
+try { data.runtime = keyFile.get_value(group, 'runtime'); } catch (err) { ... }
+```
+
+A malicious app's `metadata` file with invalid GLib KeyFile syntax (e.g. a bare line `garbage`) makes
+`load_from_file` throw `G_KEY_FILE_ERROR_PARSE`. `permissions.js:163` wraps the identical call in
+try/catch precisely because it throws; this one doesn't. Reached from `appInfoViewer._setup`
+(`appInfoViewer.js:76`) via `window.js:308` inside the `row-activated` signal handler → crashes when the
+user selects the malicious app (does not break the whole list like C1). Same root class as C1.
+`_parseCustomInstallation` (`applications.js:124`) has the same unguarded call but its files live in
+system config, not attacker-controlled.
+
+### C3 — `launchable` path traversal → arbitrary file read parsed as desktop entry (CONFIRMED, sandbox-bounded)
+
+**File:** `src/models/applications.js:263-268` (`getDesktopForAppData`)
+
+`appdata.launchable` (from the malicious app's own AppStream `<launchable type="desktop-id">`,
+`applications.js:338-340`, no `/` or `..` validation) is concatenated:
+`build_filenamev([bundlePath,'export','share','applications', launchable])` then `parse_file(…, DESKTOP_ENTRY)`.
+Verified against system glib: `g_build_filenamev` does NOT normalize `..` and does NOT reset on an
+absolute later component (it re-anchors under base). So `launchable = ../../../../../../etc/passwd`
+resolves to `/etc/passwd` and is opened + parsed; the surfaced datum is the stock icon name (low-bandwidth
+read/exfil). Runs automatically for every app via `getAll()`→`window.js:147`. In the SHIPPED sandbox the
+read is bounded to already-mounted trees (`…/flatpak/app` ro, `…/overrides`), so limited extra reach;
+becomes true arbitrary-read if Flatseal runs with broader perms/unsandboxed. Genuine unsanitized
+path-build bug. Fix: require `GLib.path_get_basename(launchable) === launchable`.
+
+## Plausible / preconditioned
+
+### P1 — env-var override-write relocation (`FLATPAK_USER_DIR` / `HOST_XDG_DATA_HOME`)
+
+`applications.js:88-104 _getUserPath()` returns `GLib.getenv('FLATPAK_USER_DIR')` (or, in-flatpak,
+`HOST_XDG_DATA_HOME`) unvalidated; it becomes the base for `permissions.js:142 _getBaseOverridesPath` →
+`mkdir_with_parents`, `save_to_file`, `unlink`. An attacker who controls Flatseal's *launch environment*
+can redirect override writes to an arbitrary dir (e.g. drop `[Context] filesystems=host;` into another
+installation's overrides). Confirmed behavior; requires env control (not a malicious *installed app*),
+so a weaker attacker model. Same for `FLATPAK_SYSTEM_DIR`, `FLATPAK_CONFIG_DIR`, `FLATPAK_INFO_PATH`,
+`FLATSEAL_PORTAL_BUS_NAME`.
+
+### P2 — app directory literally named `global` spoofs the global-override sentinel
+
+`globalModel.js:21 isGlobalOverride(appId)` is a bare `appId === 'global'` compare. A malicious app whose
+install directory is named `global` is enumerated as a normal app yet treated everywhere as the global
+overrides entry (`permissions.js`, `window.js:299/353`); `_getOverridesPath` → `…/overrides/global`.
+Logic/UI-confusion, not a path escape. Low severity on its own.
+
 ## Ruled out (so far)
 
 - **pathRow.js regexes (`_pathRE`, `_optionRE`) ReDoS** — reconstructed exactly and fuzzed in node
