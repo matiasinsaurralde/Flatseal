@@ -382,6 +382,23 @@ becomes a real distinct env override on the same app. Impact is bounded — it s
 already controls its own env — so this is data-integrity, not privilege-crossing. Fix: tighten
 VAR_REGEXP to forbid `;` in values, or don't split values.
 
+## Minor / hardening notes (low or non-security; from a fresh cold re-audit of applications.js)
+
+- **NEW-1 (LOW, TOCTOU-only):** `_getBundlePathForAppId` (`applications.js:190-194`) returns `undefined`
+  when no installation has `app/<appId>/current/active`; that `undefined` flows unguarded into
+  `GLib.build_filenamev` in 4 callers (`_getIconThemePathForAppId`, `getDesktopForAppData`,
+  `getAppDataForAppId`, `getMetadataPathForAppId`). GJS marshalling `undefined`→`char**` throws a
+  (catchable) TypeError. Only reachable if the app self-uninstalls between `getAll` enumeration and a later
+  call — attacker can't force the timing. Fix: early-return a default when bundlePath is falsy.
+- **NEW-2 (latent smell, REFUTED as live):** the `if (launchable && launchable.get_entries())` guard
+  (`applications.js:339`) is wrong (an empty GPtrArray marshals to a TRUTHY `[]`, so `[appdata.launchable]
+  = []` would set `undefined`) — but it never fires because libappstream returns `[""]` (empty string) for
+  an empty `<launchable>`, and an empty path component in `build_filenamev` is benign + the later
+  `parse_file` error is caught. Should test `.length` for robustness.
+- **NEW-3 / NEW-4 (LOW / cosmetic):** unwrapped `enumerate_children` in `_getApplicationsForPath` /
+  `_getCustomInstallationsPaths` (dirs are Flatseal-mounted, not attacker-writable); degenerate appIds make
+  `_getApproximateNameForAppId` return `''` (empty label, `markup_escape_text`-ed downstream). Not vulns.
+
 ## Attack surfaces noted (native-parser, dependency-side; not a Flatseal-code bug)
 
 - **Attacker app icons → librsvg/GdkPixbuf.** `window.js:159-164 _setupApplications` calls
