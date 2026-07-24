@@ -111,6 +111,21 @@ provide. Precondition (user override and metadata both carry `!X` for the same X
 via the v1-grant → user-revoke → v2-self-negate sequence above. Verdict CONFIRMED (root-cause logic and
 end-to-end pipeline reproduced independently in node).
 
+**Real data-flow confirmed (not just the node port):** after `_setup`, `updateProxyProperty` sets the
+GObject `filesystems-other` property to the hidden/empty value; the bidirectional binding
+(`window.js:271`) shows an empty pathsViewer. When the user toggles an unrelated permission,
+`permissions.js:294-301 _updateModels` reads `this['filesystems_other']` (still the empty string — the
+user never touched the paths) and passes it to `filesystemsOther.updateFromProxyProperty`, exactly as the
+repro does. `_saveOverrides` (241) then writes the manufactured grant. So the pipeline is faithful.
+
+**Completion to arbitrary command execution.** The escalation's target `X` is attacker-chosen, so the
+grant is not merely "some file access": `X=/` gives the app read-write to the whole host → it can write
+`~/.bashrc`, `~/.config/autostart/*.desktop`, or `~/.config/systemd/user/*` → **arbitrary command
+execution at the user's next login/shell**. `X=~/.local/share/flatpak/overrides` lets the app rewrite
+EVERY other app's override (e.g. inject `[Environment] LD_PRELOAD=…` or `filesystems=host`) → pivot to
+code execution in other apps. So E1 chains from "override permissions" all the way to "running arbitrary
+commands."
+
 **Fix:** in `removedOriginals` add `.filter(p => !this.constructor.isOverriden(this._overrides, p))` and
 skip the `negate` mapping when `isNegated(p)` (removing a metadata self-negation should CLEAR the entry,
 never grant it).
