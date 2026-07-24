@@ -43,7 +43,43 @@ Flatseal is a GJS/GTK4 app that manages Flatpak permission *overrides*. Its own 
 
 ## Confirmed findings
 
-(none yet — investigation in progress)
+### C1 — DoS: malicious AppStream release timestamp crashes Flatseal on startup (CONFIRMED)
+
+**File:** `src/models/applications.js:352-356` (`getAppDataForAppId`)
+
+```js
+if (release.get_timestamp() !== null) {
+    const ts = release.get_timestamp();
+    const date = new Date(ts * 1000);
+    appdata.date = date.toISOString().substring(0, 10);   // <-- throws RangeError
+}
+```
+
+`release.get_timestamp()` returns the attacker-controlled Unix timestamp (seconds) from an installed
+app's `…/files/share/metainfo/<appid>.metainfo.xml` (or `appdata.xml`) `<release timestamp="…"/>`.
+JS `Date` is only valid within ±8.64e15 ms, so any timestamp ≥ **8 640 000 000 001 s** makes
+`ts*1000` exceed the range and `new Date(...).toISOString()` throws `RangeError: Invalid time value`.
+Verified empirically in node (see scratchpad/date_crash.js): ts=8640000000000 OK, ts=8640000000001 THROWS.
+
+**Reachability / impact:** the throwing block is NOT wrapped in try/catch (only `metadata.parse_file`
+is). `getAppDataForAppId` is called from `getAll()` (`applications.js:376`) inside a `.map`, which is
+called from `window.js:147 _setupApplications()` (also no try/catch) during window construction, and
+from `appInfoViewer._setup()`. A single malicious app therefore makes `getAll()` throw → the app list
+never builds → **Flatseal fails to open / crashes**, and stays broken until the malicious app is
+uninstalled (persistent DoS). One malicious app also poisons enumeration of ALL apps.
+
+Minimal payload (metainfo.xml): `<releases><release version="1.0" timestamp="9999999999999999"/></releases>`.
+
+## Ruled out (so far)
+
+- **pathRow.js regexes (`_pathRE`, `_optionRE`) ReDoS** — reconstructed exactly and fuzzed in node
+  (scratchpad/redos_pathrow.js). The mandatory `/` (or option-prefix) delimiter per `+`/`*` iteration
+  makes the partition unique → linear time even at length 100+. NOT catastrophic. BLOCKED unless a new
+  mechanism appears.
+- **variables.js regexes** (`VAR_REGEXP`, deserialize split `(?=;[^;]+=)`, `split(/[=](.*)/s)`) — linear
+  in node up to 100k+ chars. No ReDoS.
+- **portals.js / info.js** — D-Bus calls wrapped in safe* try/catch; `.flatpak-info` is runtime-provided
+  (trusted). No obvious injection into D-Bus method args beyond appId (a bus-validated app name).
 
 ## Ruled out / blocked
 
