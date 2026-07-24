@@ -138,6 +138,17 @@ becomes a real distinct env override on the same app. Impact is bounded — it s
 already controls its own env — so this is data-integrity, not privilege-crossing. Fix: tighten
 VAR_REGEXP to forbid `;` in values, or don't split values.
 
+## Attack surfaces noted (native-parser, dependency-side; not a Flatseal-code bug)
+
+- **Attacker app icons → librsvg/GdkPixbuf.** `window.js:159-164 _setupApplications` calls
+  `iconTheme.add_search_path(app.appThemePath)` for EVERY app (`appThemePath` = the app's own
+  `…/export/share/icons`, `applications.js:196-200`), then `applicationRow.js:31 set_from_icon_name(appIconName)`
+  where `appIconName` derives from the app's desktop-entry stock icon (`applications.js:283-289`). A malicious
+  app ships a crafted `.svg`/`.png` matching that icon name → Flatseal renders it at startup via
+  librsvg/GdkPixbuf → potential DoS (huge/pathological SVG) or exposure to any image-loader CVE. This is a
+  generic "display other apps' icons" surface (shared with GNOME Software etc.), a dependency concern, not a
+  Flatseal-specific defect. Reachable with no user interaction. Flagged for completeness.
+
 ## Ruled out (so far)
 
 - **pathRow.js regexes (`_pathRE`, `_optionRE`) ReDoS** — reconstructed exactly and fuzzed in node
