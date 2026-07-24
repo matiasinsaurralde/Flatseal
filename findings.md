@@ -61,10 +61,11 @@ JS `Date` is only valid within ±8.64e15 ms, so any timestamp ≥ **8 640 000 00
 `ts*1000` exceed the range and `new Date(...).toISOString()` throws `RangeError: Invalid time value`.
 Verified empirically in node (see scratchpad/date_crash.js): ts=8640000000000 OK, ts=8640000000001 THROWS.
 
-**Input is attacker-controlled & unclamped:** verified in AppStream source — the XML `timestamp`
-attribute is parsed with a bare `atol()` into a guint64 with NO range-clamping
-(`as-release.c:926-928`), and `get_timestamp()` returns it raw. So `<release timestamp="…">` in the
-malicious app's bundle directly controls `ts`.
+**Input is attacker-controlled:** verified against the REAL installed `libappstream.so.5` (v1.0.2):
+AppStream parses the XML `timestamp` attribute and clamps it to `INT64_MAX` = 9223372036854775807.
+Even clamped, `INT64_MAX * 1000 ≈ 9.2e21 ms` ≫ JS Date's ±8.64e15 range, so `toISOString()` still
+throws. `<release timestamp="99999999999999999999">` in the malicious app's bundle is sufficient (any
+timestamp whose seconds*1000 exceeds 8.64e15 ms, i.e. ≥ 8,640,000,000,001 s, triggers it).
 
 **Reachability / impact (corrected — NOT a SIGABRT):** the throwing block is NOT wrapped in try/catch
 (only `metadata.parse_file` is). `getAppDataForAppId` is called from `getAll()` (`applications.js:375`)
@@ -123,6 +124,21 @@ read/exfil). Runs automatically for every app via `getAll()`→`window.js:147`. 
 read is bounded to already-mounted trees (`…/flatpak/app` ro, `…/overrides`), so limited extra reach;
 becomes true arbitrary-read if Flatseal runs with broader perms/unsandboxed. Genuine unsanitized
 path-build bug. Fix: require `GLib.path_get_basename(launchable) === launchable`.
+
+### C4 — Memory-exhaustion DoS: unbounded file read of an attacker-controlled launchable/appdata file (CONFIRMED, dependency-assisted)
+
+**Files:** Flatseal `getDesktopForAppData` (`applications.js:258-277`) / `getAppDataForAppId`
+(`applications.js:294-325`) feed an attacker-controlled file path to `AppStream.Metadata.parse_file`,
+which (`libappstream as-metadata.c:768-778`) reads the ENTIRE file into a `GString` with NO size cap
+before libxml2/GKeyFile limits ever apply.
+
+The attacker fully controls the bytes of their own bundle's `export/share/applications/<launchable>`
+file (and their `appdata.xml`/`metainfo.xml`). By shipping a multi-GB file there and naming it as the
+`<launchable>`, Flatseal's `getDesktopForAppData` — called for EVERY app during `getAll()` at startup
+(`applications.js:377`) — buffers the whole file into memory → memory exhaustion / long hang, no user
+interaction. Combined with the C3 traversal, `launchable` can also point at a large/endless reachable
+file on the mount. Verified library behavior (agent dlopen'd the real lib); the read loop is unbounded.
+Impact: startup DoS (memory/CPU), same "malicious installed app disables Flatseal" outcome as C1.
 
 ## Plausible / preconditioned
 
@@ -199,6 +215,19 @@ VAR_REGEXP to forbid `;` in values, or don't split values.
   path component; cannot introduce `../`. Absolute-component injection into `build_filenamev` is
   re-anchored under the base (verified against system glib), so only `../` escapes — and appId can't
   carry it. (Only `launchable`, a freer AppStream string, can — see C3.)
+- **AppStream XXE / external-entity file-read / SSRF — REFUTED (real-library + strace).** libappstream
+  1.0.2 parses with `XML_PARSE_NOBLANKS | XML_PARSE_NONET | XML_PARSE_BIG_LINES` (`as-xml.c:1107`); it
+  never sets `XML_PARSE_NOENT` or `XML_PARSE_DTDLOAD` and never overrides the entity loader. A DOCTYPE
+  with `<!ENTITY xxe SYSTEM "file:///…">` yields empty content and strace shows ZERO file/socket access.
+  Internal entities substitute (attacker's own literal text only). `<name>&xxe;</name>` does not leak
+  files.
+- **AppStream entity-bomb / deep-nesting / huge-node DoS — REFUTED.** libxml2 2.9.14 defaults
+  (no `XML_PARSE_HUGE`) reject the billion-laughs bomb ("entity reference loop"), cap depth at 256, and
+  cap node size ("Huge input lookup") — all clean GErrors, no OOM/stack-overflow.
+- **Desktop-entry parse of an arbitrary (C3-traversed) file crashing — REFUTED.** `parse_file(…,
+  DESKTOP_ENTRY)` → `g_key_file_load_from_data`; tested against the real lib with ELF binaries, NUL-laden
+  blobs, /etc/passwd, 50k groups → clean GError, no assert/abort/segv/hang. The C3 traversal only leaks a
+  symbolic icon name if the target file already is a valid `[Desktop Entry]`.
 
 ## Ruled out / blocked
 
