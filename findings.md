@@ -2,6 +2,24 @@
 
 Status: IN PROGRESS (started 2026-07-24)
 
+## TL;DR — the surviving chain
+
+**Primary (E1): a privilege-escalation "override permissions" bug in the filesystem permission-diff
+engine.** A malicious Flatpak app can get Flatseal to silently rewrite a user's *negated* filesystem
+override (e.g. the user's `!/` revocation) into a *positive grant* (`filesystems=/` — full host
+read-write, a sandbox escape), triggered by any later unrelated user edit. Root cause:
+`filesystemsOther.js:134` unconditionally `negate()`s "removed" originals with no `isNegated`/`_overrides`
+guard. Independently reproduced in node. See ★ E1 below.
+
+**Supporting DoS chains:** C1 (AppStream `<release timestamp>` overflow → uncaught `RangeError` →
+Flatseal fails to open — persistent windowless startup DoS from one installed app) and C4 (unbounded
+launchable/appdata file read → memory-exhaustion DoS at startup). C3 is a bounded path-traversal read.
+
+Note on "crash the process": on the GNOME 50 / GJS runtime, uncaught JS exceptions are logged-and-
+continued (NOT SIGABRT). So C1/C2 are functional DoS (windowless / degraded), not hard crashes. No
+attacker-reachable hard `abort()` was found in the JS or in libappstream/libxml2/GKeyFile (XXE,
+entity-bomb, desktop-parse all refuted against the real libraries).
+
 ## Threat model
 
 Flatseal is a GJS/GTK4 app that manages Flatpak permission *overrides*. Its own manifest
@@ -42,6 +60,60 @@ Flatseal is a GJS/GTK4 app that manages Flatpak permission *overrides*. Its own 
   docs viewer, D-Bus portals `PermissionStore`. Clone + audit the specific calls.
 
 ## Confirmed findings
+
+### ★ E1 — PRIVILEGE ESCALATION: `filesystemsOther` diff logic flips a negation into a positive filesystem GRANT (CONFIRMED — independently reproduced)
+
+**This is the primary finding — a real "overriding permissions" sandbox escape.**
+
+**File:** `src/models/filesystemsOther.js:128-146` (`updateFromProxyProperty`), root cause the
+`removedOriginals` computation at lines 128-134 — the **unconditional** `.map(p => negate(p))` (line 134)
+with **no `isNegated` guard and no filter against `this._overrides`** (contrast `removedGlobals`
+at 136-143 which guards `!isOverriden(this._originals, p)`).
+
+**Mechanism.** For any path routed to `filesystemsOther` (anything except bare `host`/`host-os`/
+`host-etc`/`home`):
+1. When the app metadata AND the user's own `overrides/<app>` file BOTH contain the same *negated* path
+   `!X`, `updateProxyProperty` (157-192) HIDES both from the displayed value (the original is filtered by
+   `!isOverriden(this._overrides, p)`; the override by the `isOverriden(this._originals, p) && isNegated`
+   filter) → the UI shows an EMPTY "Other files" list.
+2. On the next save (triggered by ANY unrelated user toggle → `permissions.js:294 _updateModels` →
+   re-derives every model), `updateFromProxyProperty` receives the empty displayed value, so the metadata
+   original `!X` is not in `paths`. `removedOriginals` therefore treats it as "user-removed" and applies
+   `negate(removeMode('!X'))` = **`X`** (a positive grant, because `negate` is symmetric), writing it to
+   `_overrides`.
+3. `_saveOverrides` persists `filesystems=X`. Flatpak merges the per-app override AFTER metadata, so `X`
+   (read-write) wins → **the app gains the access the user had revoked.**
+
+**Independently reproduced** (scratchpad/verify_escalation.js — a faithful port of the exact source):
+```
+metadata !/  + user override !/   -> UI shows ""  -> saved override = "/"     *** ESCALATION ***
+metadata !~/.ssh + user ovr !~/.ssh-> UI shows ""  -> saved override = "~/.ssh" *** ESCALATION ***
+CONTROL metadata grants ~/.ssh + user denies -> stays "!~/.ssh" (correct, no flip)
+CONTROL metadata !~/.ssh, no user override   -> saved "" (correct)
+```
+`X = /` yields `filesystems=/` — read-write access to the **entire host filesystem** (equivalent to or
+worse than `filesystem=host`): full sandbox escape. Other high-value targets: `~/.ssh` (key theft),
+`~/.config/autostart` (persistence / code execution at login), `~/.local/share/flatpak/overrides`
+(pivot to rewrite EVERY app's sandbox → arbitrary-command chain).
+
+**Concrete attack chain (fully attacker-orchestrated; one natural user action):**
+1. Malicious app **v1** ships metadata `[Context]\nfilesystems=/` (or `~/.ssh`) — a visible scary grant.
+2. The security-conscious user opens Flatseal and **revokes** it → Flatseal writes `overrides/<app>` =
+   `[Context]\nfilesystems=!/`. (This is exactly the tool's intended protective use.)
+3. Malicious app **v2** updates its metadata to `[Context]\nfilesystems=!/` (self-negates — appears MORE
+   trustworthy: "we dropped the filesystem requirement"). Now metadata `!/` AND user override `!/`.
+4. The user makes ANY later change to that app in Flatseal (toggle network, add an env var, anything).
+   → the override is silently rewritten to `filesystems=/`. The UI still shows nothing. The app now has
+   full host read-write access, against the user's explicit revocation.
+
+**Severity: HIGH.** Silent, persistent, and it defeats the exact security guarantee Flatseal exists to
+provide. Precondition (user override and metadata both carry `!X` for the same X) is reliably reachable
+via the v1-grant → user-revoke → v2-self-negate sequence above. Verdict CONFIRMED (root-cause logic and
+end-to-end pipeline reproduced independently in node).
+
+**Fix:** in `removedOriginals` add `.filter(p => !this.constructor.isOverriden(this._overrides, p))` and
+skip the `negate` mapping when `isNegated(p)` (removing a metadata self-negation should CLEAR the entry,
+never grant it).
 
 ### C1 — DoS: malicious AppStream release timestamp crashes Flatseal on startup (CONFIRMED)
 
@@ -139,6 +211,44 @@ file (and their `appdata.xml`/`metainfo.xml`). By shipping a multi-GB file there
 interaction. Combined with the C3 traversal, `launchable` can also point at a large/endless reachable
 file on the mount. Verified library behavior (agent dlopen'd the real lib); the read loop is unbounded.
 Impact: startup DoS (memory/CPU), same "malicious installed app disables Flatseal" outcome as C1.
+
+### R1 — Race: attacker-triggered metadata reload during the pre-save window silently drops the user's edit / protective negation (CONFIRMED logic flaw; PLAUSIBLE reliable exploit)
+
+**Files:** `permissions.js` `_delayedUpdate` (275) → `_updateModels` (294, `_changesByUser++` at 303) →
+`_saveOverrides` (241); monitor path `_delayMonitorsChanged` (358) → `_updateFromMonitors` (366) →
+`_setup` (311); decision logic `shared.js:updateFromProxyProperty` (95-125).
+
+**Root cause:** the persist decision is recomputed at SAVE time from the in-memory
+`_originals/_globals/_overrides` singletons. `_updateFromMonitors` calls `_setup()` whenever
+`_changesByUser === 0` — which is still true during the 500 ms debounce between a user toggle and its
+save (the counter is incremented inside `_updateModels`, which hasn't run yet). `_setup()` does
+`model.reset()` + reload from the CURRENT (attacker-swapped) `metadata`, and does NOT cancel or flush the
+pending `_delayedHandlerId`. The monitor is wired to ALL events with no event-type filter (contrast
+`applications.js:_changedDelayed` which gates on `TARGET_EVENTS`), so a trivial `flatpak update`/touch of
+the malicious app's own `metadata` (the one monitored file the app CAN write) triggers it.
+
+**Verified** (I independently traced `shared.js:95-125`; race agent also ported it to node): with the user
+toggling Network OFF while a reload has removed `network` from `_originals`, `updateFromProxyProperty`
+takes the `if (matchesDefault && !seenInGlobals && !seenInOriginals) return;` branch and never adds
+`!network` → `_saveOverrides` writes an empty set → `GLib.unlink`. The protective negation is silently
+discarded; the app keeps the permission the user tried to revoke. In the non-raced path `seenInOriginals`
+is true so `!network` IS persisted. A reload can never fabricate a positive grant (originals are never
+serialized), so the impact is specifically DROPPING user-added restrictions — precisely defeating the
+tool's purpose.
+
+**Impact tiers:** (a) deterministic lost-update: any in-flight edit (incl. `!host`, bus denials) is
+discarded if a reload lands in its 500 ms window; (b) stealthy: the app retains a revoked permission and
+the re-derived UI can show it as revoked. **Exploitation is probabilistic** (attacker must land a metadata
+touch in the unobservable 500 ms pre-toggle-save window; continuous touching just starves the debounce, so
+it must pulse) — hence CONFIRMED logic flaw / PLAUSIBLE reliable exploit. Fix: in `_updateFromMonitors`,
+flush the pending save (`_processPendingUpdates`) before `_setup()`, or merge into scratch state instead
+of resetting singletons under a pending edit.
+
+Race Findings 2-5 (cross-app pending-save write, singleton cross-app leak, backup/undo cross-app write,
+overrides-dir symlink TOCTOU) — REFUTED: GJS is single-threaded (no mid-callback preemption); `set appId`
+flushes the pending save via `_processPendingUpdates` BEFORE reassigning `_appId`; app-switch dismisses
+the undo toast (so `undo` is unreachable post-switch) and nulls `_backup`; and the overrides dir is not
+attacker-writable (Flatseal alone holds `overrides:create`), so no symlink swap.
 
 ## Plausible / preconditioned
 
