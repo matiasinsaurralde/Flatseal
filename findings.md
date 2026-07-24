@@ -303,13 +303,16 @@ VAR_REGEXP to forbid `;` in values, or don't split values.
 ## Attack surfaces noted (native-parser, dependency-side; not a Flatseal-code bug)
 
 - **Attacker app icons → librsvg/GdkPixbuf.** `window.js:159-164 _setupApplications` calls
-  `iconTheme.add_search_path(app.appThemePath)` for EVERY app (`appThemePath` = the app's own
-  `…/export/share/icons`, `applications.js:196-200`), then `applicationRow.js:31 set_from_icon_name(appIconName)`
-  where `appIconName` derives from the app's desktop-entry stock icon (`applications.js:283-289`). A malicious
-  app ships a crafted `.svg`/`.png` matching that icon name → Flatseal renders it at startup via
-  librsvg/GdkPixbuf → potential DoS (huge/pathological SVG) or exposure to any image-loader CVE. This is a
-  generic "display other apps' icons" surface (shared with GNOME Software etc.), a dependency concern, not a
-  Flatseal-specific defect. Reachable with no user interaction. Flagged for completeness.
+  `iconTheme.add_search_path(app.appThemePath)` for EVERY app then renders the attacker's icon by name at
+  startup on the main thread (`applicationRow.js:31`). The chain is real, BUT **hard-crash REFUTED**:
+  modern GNOME (50) decodes images OUT-OF-PROCESS via glycin (sandboxed subprocess with `setrlimit` +
+  seccomp), so a decoder crash (incl. a librsvg Rust `panic!`→SIGABRT across the FFI) kills only the
+  subprocess → glycin returns a GError → GTK logs a failed icon load → Flatseal continues. Amplification
+  DoS is capped by librsvg limits (`MAX_LAYER_NESTING_DEPTH=50`, `MAX_LOADED_ELEMENTS=1e6`, etc., all
+  graceful `Err`) + glycin memory cap. gdk-pixbuf 2.42.10 raster loaders empirically fuzzed with 17
+  crafted payloads (huge dims/counts, truncation) → every one a graceful `GDK_PIXBUF_ERROR`, zero
+  SIGABRT/SIGSEGV. Only residual: a BOUNDED transient main-thread UI freeze (synchronous decode) —
+  PLAUSIBLE, low. So no hard crash and no unbounded DoS via icons on the shipped runtime.
 
 ## Ruled out (so far)
 
