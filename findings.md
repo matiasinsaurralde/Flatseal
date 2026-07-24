@@ -105,15 +105,14 @@ path-build bug. Fix: require `GLib.path_get_basename(launchable) === launchable`
 
 ## Plausible / preconditioned
 
-### P1 — env-var override-write relocation (`FLATPAK_USER_DIR` / `HOST_XDG_DATA_HOME`)
+### P1 — env-var override-write relocation (`FLATPAK_USER_DIR` / `HOST_XDG_DATA_HOME`) — INTENDED CONFIG
 
 `applications.js:88-104 _getUserPath()` returns `GLib.getenv('FLATPAK_USER_DIR')` (or, in-flatpak,
-`HOST_XDG_DATA_HOME`) unvalidated; it becomes the base for `permissions.js:142 _getBaseOverridesPath` →
-`mkdir_with_parents`, `save_to_file`, `unlink`. An attacker who controls Flatseal's *launch environment*
-can redirect override writes to an arbitrary dir (e.g. drop `[Context] filesystems=host;` into another
-installation's overrides). Confirmed behavior; requires env control (not a malicious *installed app*),
-so a weaker attacker model. Same for `FLATPAK_SYSTEM_DIR`, `FLATPAK_CONFIG_DIR`, `FLATPAK_INFO_PATH`,
-`FLATSEAL_PORTAL_BUS_NAME`.
+`HOST_XDG_DATA_HOME`) unvalidated; it becomes the base for `permissions.js:142 _getBaseOverridesPath`.
+However these env vars are *supported configuration knobs* (Flatpak itself honours
+`FLATPAK_USER_DIR`/`FLATPAK_SYSTEM_DIR`; the test suite sets them to point at fixtures —
+`tests/src/testModels.js:121-122`). A sandboxed malicious app cannot set Flatseal's environment, so this
+is not a real vuln under the primary threat model. Downgraded to informational.
 
 ### P2 — app directory literally named `global` spoofs the global-override sentinel
 
