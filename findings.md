@@ -122,6 +122,23 @@ install directory is named `global` is enumerated as a normal app yet treated ev
 overrides entry (`permissions.js`, `window.js:299/353`); `_getOverridesPath` → `…/overrides/global`.
 Logic/UI-confusion, not a path escape. Low severity on its own.
 
+### F-ENV — confined `[Environment]` value-splitting / env laundering (CONFIRMED, low-impact)
+
+**Files:** `src/models/variables.js:26` (`VAR_REGEXP = /^[^;\s]+=[\S ]+$/` — forbids `;` in the key but
+`[\S ]+` ALLOWS `;` in the value) and `variables.js:76-80` (`deserialize` splits on `/(?=;[^;]+=)/`).
+
+A malicious app metadata `[Environment]` entry `FOO=a;PATH=/evil` is a single Flatpak env var
+`FOO` = `a;PATH=/evil`. Flatseal loads it as one original, but `deserialize` tears it into two rows
+`FOO=a` and `PATH=/evil`. After ANY user interaction (which triggers `_updateModels`/`_saveOverrides`),
+`updateFromProxyProperty` writes BOTH `FOO=a` and a NEW standalone `PATH=/evil` as overrides
+(verified in node by the widgets agent). Net effect: Flatseal "activates" a separate `PATH` (or any
+`NAME=value`) override that raw Flatpak parsing of the manifest would NOT have set — an env-var
+laundering / confused-deputy: a value hidden inside another var's value (evading manifest review)
+becomes a real distinct env override on the same app. Impact is bounded — it stays within the
+`[Environment]` group of the SAME app (cannot cross into `filesystems=`/bus policy), and the app author
+already controls its own env — so this is data-integrity, not privilege-crossing. Fix: tighten
+VAR_REGEXP to forbid `;` in values, or don't split values.
+
 ## Ruled out (so far)
 
 - **pathRow.js regexes (`_pathRE`, `_optionRE`) ReDoS** — reconstructed exactly and fuzzed in node
@@ -132,6 +149,25 @@ Logic/UI-confusion, not a path escape. Low severity on its own.
   in node up to 100k+ chars. No ReDoS.
 - **portals.js / info.js** — D-Bus calls wrapped in safe* try/catch; `.flatpak-info` is runtime-provided
   (trusted). No obvious injection into D-Bus method args beyond appId (a bus-validated app name).
+- **KeyFile write-injection (F1 family) — REFUTED (real-GLib tested).** `get_value` values are always
+  single-line (a newline terminates the line at parse), so no attacker metadata value can carry a raw
+  `0x0A` to inject a new `[group]`/`key=` on re-serialize, even though `set_value`/`to_data` write
+  verbatim/unescaped. `unsupported` catch-all is gated `overrides && !global` (only the user's own
+  override file, never metadata). Saves write ONLY `_overrides` (never `_originals`/`_globals`), and
+  key names with `[`/`]` make `load_from_file` throw (caught → `emit('failed')`). Latent hardening note:
+  if any override read ever switches `get_value`→`get_string`, injection becomes live.
+- **Pango markup injection — REFUTED.** No `set_markup`/`use-markup` anywhere in `src/**`. The one
+  attacker string hitting a markup-honoring title (`appName`→`Adw.ActionRow.set_title`) is escaped with
+  `GLib.markup_escape_text` (`applicationRow.js:32`). All other attacker strings go to plain
+  `GtkLabel.set_label`/`set_text`. `set_subtitle(appId)` is unescaped but appId is a bus-name-form
+  basename (defense-in-depth only).
+- **Cross-key / cross-group override injection — REFUTED** (independently, via node round-trips): tokens
+  are split on load and re-joined symmetrically; `set_value` cannot synthesize a `[Group]` header; bus
+  names only ever become keys under their own `[… Bus Policy]` group.
+- **appId path traversal — REFUTED.** appId = `GLib.path_get_basename` of a dir entry → always a single
+  path component; cannot introduce `../`. Absolute-component injection into `build_filenamev` is
+  re-anchored under the base (verified against system glib), so only `../` escapes — and appId can't
+  carry it. (Only `launchable`, a freer AppStream string, can — see C3.)
 
 ## Ruled out / blocked
 
