@@ -40,6 +40,31 @@ continued (NOT SIGABRT). So C1/C2 are functional DoS (windowless / degraded), no
 attacker-reachable hard `abort()` was found in the JS or in libappstream/libxml2/GKeyFile (XXE,
 entity-bomb, desktop-parse all refuted against the real libraries).
 
+## Full exploit chain (the answer to "identify the chain")
+
+A malicious/untrusted Flatpak app the victim installs — abusing E1 — achieves, in order:
+**parse untrusted metadata → override-permission escalation → sandbox escape → arbitrary command execution.**
+
+1. **Delivery.** Attacker publishes an innocuous-looking Flatpak app. Its `metadata` contains
+   `[Context]\nfilesystems=!~/.config/autostart` (or `!~/.ssh`, `!/`, `!~/.local/share/flatpak/overrides`)
+   — a *self-denial* that makes the app look MORE trustworthy ("we don't touch your files").
+2. **Confused-deputy trigger (E1 / N2, one step).** The victim opens the app in Flatseal and sees a
+   removable "Can't read: ~/.config/autostart" row. They click remove (natural cleanup). Flatseal's
+   `filesystemsOther` diff bug (`filesystemsOther.js:134`, unconditional `negate()` on a removed deny)
+   writes the OPPOSITE — `overrides/<app>` = `[Context]\nfilesystems=~/.config/autostart` — a read-write
+   GRANT. (Alternative fully-silent trigger: E1 two-step — after a prior revoke, any unrelated edit flips
+   it, with the UI showing nothing.)
+3. **Sandbox escape.** Flatpak honors the override; the app now has read-write access outside its sandbox.
+4. **Arbitrary command execution.** The app writes `~/.config/autostart/x.desktop` with
+   `Exec=<attacker command>` → runs as the user, unsandboxed, at next login. (Equivalently: grant `/` and
+   write `~/.bashrc`; or grant `~/.local/share/flatpak/overrides` and inject
+   `[Environment] LD_PRELOAD=…` into every other app's override → code execution in those apps → also
+   satisfies "unsafe plugins / malicious extensions".)
+
+Supporting standalone chains: **C1** (a crafted `<release timestamp>` makes Flatseal fail to open at all —
+a persistent DoS of the very tool meant to contain the attacker) and **C4** (a huge launchable file
+exhausts memory at startup). All three need nothing but the malicious app being installed.
+
 ## Threat model
 
 Flatseal is a GJS/GTK4 app that manages Flatpak permission *overrides*. Its own manifest
