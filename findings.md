@@ -1,8 +1,10 @@
 # Flatseal Zero-Day Analysis — Findings
 
-Status: PRIMARY CHAIN CONFIRMED (2026-07-24). Investigation broad + deep (8 parallel agent lines across
-9 approach families; key claims reproduced independently and adversarially re-verified; core deps
-libappstream/libxml2/GKeyFile/glycin tested against the real libraries).
+Status: COMPLETE — PRIMARY CHAIN CONFIRMED (2026-07-24). Investigation broad + deep: 10 parallel agent
+lines across 10 approach families; the primary finding (E1) reproduced by 3 independent faithful ports and
+survived a dedicated adversarial refutation pass; every other family confirmed or refuted with evidence;
+core deps (libappstream 1.0.2 / libxml2 2.9.14 / GLib 2.80 KeyFile / glycin image loaders) tested against
+the REAL installed libraries with compiled C / python-gi harnesses.
 
 ## Findings summary
 
@@ -39,6 +41,17 @@ Note on "crash the process": on the GNOME 50 / GJS runtime, uncaught JS exceptio
 continued (NOT SIGABRT). So C1/C2 are functional DoS (windowless / degraded), not hard crashes. No
 attacker-reachable hard `abort()` was found in the JS or in libappstream/libxml2/GKeyFile (XXE,
 entity-bomb, desktop-parse all refuted against the real libraries).
+
+**Hard process-crash (SIGABRT/SIGSEGV) — DEFINITIVELY REFUTED** (5 boundary candidates, empirical C
+harnesses vs real GLib 2.80 / libappstream 1.0.2): `GLib.DateTime.new` out-of-range returns NULL (not
+abort); NUL/`undefined` into `char*` → catchable TypeError / `''` (and NUL isn't even reachable through
+keyfile/XML/dir-name); `ParamSpec.int` out-of-range → non-fatal `g_warning`, value rejected; libappstream
+has ZERO `g_error(` and its only `g_assert(`s are in YAML/XML *emit* paths Flatseal never calls (20
+malicious inputs incl. billion-laughs/XXE/huge-timestamp → exit 0); keyfile `get_groups`/`get_keys`/
+`get_value` don't throw on any malformed-but-loaded content (and would be logged anyway). Flatseal runs
+via plain `gjs` with no `--fatal-warnings`/`G_DEBUG=fatal-*`. So the "crash the process" goal is
+achievable only in the FUNCTIONAL sense (Flatseal won't open / a view fails to populate), via C1/C4/C2,
+never as a hard abort.
 
 ## Full exploit chain (the answer to "identify the chain")
 
