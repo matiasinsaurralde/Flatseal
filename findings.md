@@ -5,11 +5,15 @@ Status: IN PROGRESS (started 2026-07-24)
 ## TL;DR — the surviving chain
 
 **Primary (E1): a privilege-escalation "override permissions" bug in the filesystem permission-diff
-engine.** A malicious Flatpak app can get Flatseal to silently rewrite a user's *negated* filesystem
-override (e.g. the user's `!/` revocation) into a *positive grant* (`filesystems=/` — full host
-read-write, a sandbox escape), triggered by any later unrelated user edit. Root cause:
-`filesystemsOther.js:134` unconditionally `negate()`s "removed" originals with no `isNegated`/`_overrides`
-guard. Independently reproduced in node. See ★ E1 below.
+engine.** A malicious Flatpak app whose metadata *self-denies* a path (`filesystems=!~/.ssh`) can get
+Flatseal to write a positive read-write GRANT of that path (`filesystems=~/.ssh`) into the app's override
+— either when the user clicks "remove" on the displayed deny-row (one step), or silently on any unrelated
+edit after the user had revoked it (two steps). Targets include `~/.ssh` (key theft),
+`~/.config/autostart` (code execution at login), the flatpak `overrides` dir (pivot to LD_PRELOAD-inject
+every other app), and `/` (host-equivalent read-write). Root cause: `filesystemsOther.js:134`
+unconditionally `negate()`s "removed" originals with no `isNegated`/`_overrides` guard (the shared model
+HAS this guard; filesystemsOther lost it). Reproduced end-to-end against the real source by two
+independent agents. See ★ E1 below.
 
 **Supporting DoS chains:** C1 (AppStream `<release timestamp>` overflow → uncaught `RangeError` →
 Flatseal fails to open — persistent windowless startup DoS from one installed app) and C4 (unbounded
@@ -91,25 +95,40 @@ metadata !~/.ssh + user ovr !~/.ssh-> UI shows ""  -> saved override = "~/.ssh" 
 CONTROL metadata grants ~/.ssh + user denies -> stays "!~/.ssh" (correct, no flip)
 CONTROL metadata !~/.ssh, no user override   -> saved "" (correct)
 ```
-`X = /` yields `filesystems=/` — read-write access to the **entire host filesystem** (equivalent to or
-worse than `filesystem=host`): full sandbox escape. Other high-value targets: `~/.ssh` (key theft),
-`~/.config/autostart` (persistence / code execution at login), `~/.local/share/flatpak/overrides`
-(pivot to rewrite EVERY app's sandbox → arbitrary-command chain).
+Target `X` is attacker-chosen. Highest-value NON-reserved targets (flatpak honors these read-write):
+`~/.ssh` (SSH private-key theft), `~/.config/autostart` (arbitrary code execution at next login),
+`~/.local/share/flatpak/overrides` (pivot: rewrite EVERY other app's sandbox → inject
+`[Environment] LD_PRELOAD=…`/`filesystems=host` → arbitrary command execution in other apps), `~/.bashrc`.
+`X = /` grants host-equivalent read-write (root minus flatpak's runtime-shadowed system dirs) — a full
+escape for user data. NOTE (Flatpak semantics, corrected): flatpak IGNORES requests for reserved paths
+`/app,/bin,/dev,/etc,/lib*,/proc,/run/flatpak,/run/host,/sbin,/usr`, so `/etc` is NOT a usable target
+(use `host-etc`, which routes to the safe model) — but `~/.ssh`, `~/.config/autostart`, `~/…`, and `/`
+(non-reserved portions) all yield real grants.
 
-**Concrete attack chain (fully attacker-orchestrated; one natural user action):**
-1. Malicious app **v1** ships metadata `[Context]\nfilesystems=/` (or `~/.ssh`) — a visible scary grant.
-2. The security-conscious user opens Flatseal and **revokes** it → Flatseal writes `overrides/<app>` =
-   `[Context]\nfilesystems=!/`. (This is exactly the tool's intended protective use.)
-3. Malicious app **v2** updates its metadata to `[Context]\nfilesystems=!/` (self-negates — appears MORE
-   trustworthy: "we dropped the filesystem requirement"). Now metadata `!/` AND user override `!/`.
-4. The user makes ANY later change to that app in Flatseal (toggle network, add an env var, anything).
-   → the override is silently rewritten to `filesystems=/`. The UI still shows nothing. The app now has
-   full host read-write access, against the user's explicit revocation.
+**Two confirmed arming paths (both reproduced end-to-end against the real source):**
 
-**Severity: HIGH.** Silent, persistent, and it defeats the exact security guarantee Flatseal exists to
-provide. Precondition (user override and metadata both carry `!X` for the same X) is reliably reachable
-via the v1-grant → user-revoke → v2-self-negate sequence above. Verdict CONFIRMED (root-cause logic and
-end-to-end pipeline reproduced independently in node).
+*One-step (simplest — no app update needed):*
+1. Malicious app ships metadata `[Context]\nfilesystems=!~/.ssh` — appears to *self-deny* SSH (looks
+   trustworthy/harmless). No user override yet.
+2. User opens the app in Flatseal and sees a removable filesystem row "Can't read: ~/.ssh". The user
+   clicks the row's **remove (–)** button (a natural "I don't need this entry" action).
+3. Flatseal writes `overrides/<app>` = `[Context]\nfilesystems=~/.ssh` — a positive READ-WRITE GRANT of
+   the user's SSH keys, the opposite of removing a deny.
+
+*Two-step (fully silent — no explicit path action):*
+1. Malicious app **v1** ships `filesystems=~/.ssh` (a visible grant). User **revokes** it → Flatseal
+   writes `overrides/<app>` = `filesystems=!~/.ssh` (intended protective use).
+2. Malicious app **v2** updates metadata to `filesystems=!~/.ssh` (self-negates — appears MORE
+   trustworthy). Now metadata `!~/.ssh` AND override `!~/.ssh`; the UI shows an EMPTY list.
+3. The user makes ANY unrelated change (toggle network, add an env var). → the override is silently
+   rewritten to `filesystems=~/.ssh`. UI still shows nothing. The app regains the access the user revoked.
+
+**Severity: HIGH.** Silent (two-step) or one careless click (one-step), persistent, and it defeats the
+exact security guarantee Flatseal exists to provide. CONFIRMED by two independent faithful reproductions
+(mine: `scratchpad/verify_escalation.js`; adversarial re-verify: `scratchpad/adv_verify*.js`) driving the
+real `permissions.js` `_setup`→`_updateModels`→`_saveOverrides` lifecycle to a final on-disk override of
+`[Context]\nfilesystems=~/.ssh` (or `/`). Adversarial refutation attempts (routing collapse, display
+non-empty, save clobber/merge, pathRow validation, shared-model safety) ALL failed to break it.
 
 **Real data-flow confirmed (not just the node port):** after `_setup`, `updateProxyProperty` sets the
 GObject `filesystems-other` property to the hidden/empty value; the bidirectional binding
