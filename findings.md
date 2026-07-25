@@ -194,7 +194,15 @@ a self-denial) — evading the disclosure control; and (2) it DEFEATS a user's d
 security tool grants what the user tried to deny). If the victim never opens that app in Flatseal, E1
 never fires and the `!X`-declaring app has no access. Realistic rating: MEDIUM in practice (confused-deputy
 gated on Flatseal interaction), HIGH as a correctness defect for a security tool (it does the opposite of
-the user's explicit intent). The two-step (defeat-revocation) framing is the strongest; the one-step relies
+the user's explicit intent).
+
+Further weakening: `filesystems=home` is a COMMON, normal-looking request (a large share of real Flathub
+apps use it), and Flatpak's `home` includes dotfiles — `~/.ssh`, `~/.bashrc`, `~/.gnupg` — with no
+exclusion. So the disclosure control barely functions: a malicious app can just declare `home`, look
+ordinary, and read the SSH key already. E1's file-theft utility is therefore STRICTLY LESS than the
+mundane `home` request; its only niche is an app wanting to appear maximally clean (declares nothing, or
+`!~/.ssh`) AND a victim who uses Flatseal on it. This makes E1 primarily a "Flatseal writes the opposite
+of the user's intent" correctness/trust bug rather than a practical new exfiltration primitive. The two-step (defeat-revocation) framing is the strongest; the one-step relies
 on the user choosing to remove a deny-row, which an attacker who simply wanted the grant would not need.
 
 **Severity: genuine defect, preconditioned (see calibration above).** Silent (two-step) or one careless
