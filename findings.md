@@ -60,6 +60,28 @@ via plain `gjs` with no `--fatal-warnings`/`G_DEBUG=fatal-*`. So the "crash the 
 achievable only in the FUNCTIONAL sense (Flatseal won't open / a view fails to populate), via C1/C4/C2,
 never as a hard abort.
 
+## C1 — REPRODUCED END-TO-END against real installed Flatseal (2026-07-25)
+
+The maintainer built the minimal PoC Flatpak (crafted `<release timestamp="8640000000001">`), installed it
+`--user`, and launched the real `com.github.tchx84.Flatseal`. Observed stack trace matches the predicted
+chain line-for-line:
+```
+Gjs-CRITICAL: JS ERROR: RangeError: invalid date
+  getAppDataForAppId  .../models/applications.js:355:33
+  getAll/<           .../models/applications.js:376:34
+  getAll             .../models/applications.js:375:21
+  _setupApplications .../widgets/window.js:147:52
+  _setup             .../widgets/window.js:130:14
+  _init              .../widgets/window.js:74:14
+  FlatsealWindow     .../widgets/window.js:71:4
+  vfunc_activate     .../application.js:107:28
+  main               .../main.js:34:24
+```
+Confirms: (1) throw is at `applications.js:355` (the `toISOString()` conversion); (2) it fires during
+startup window construction via `getAll()`→`_setupApplications`→`vfunc_activate` (not merely on row
+select); (3) GJS logs it as `Gjs-CRITICAL`/JS ERROR and continues — a functional/windowless DoS, not a
+SIGABRT, exactly as characterized. C1 status: CONFIRMED (source analysis + node repro + live end-to-end).
+
 ## Upstream status (post-discovery check, at maintainer's request)
 
 - **C1 is present VERBATIM in upstream `tchx84/Flatseal` `master`** — `getAppDataForAppId` has the identical
