@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.test.BadTimestamp</id>
+  <name>Bad Timestamp</name>
+  <releases>
+    <release version="1.0" timestamp="8640000000001"/>
+  </releases>
+</component>

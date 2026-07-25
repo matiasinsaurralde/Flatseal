@@ -56,6 +56,7 @@ const _globalRestoredAppId = 'com.test.GlobalRestored';
 const _statusesAppId = 'com.test.Statuses';
 const _malformedAppId = 'com.test.Malformed';
 const _conditionalAppId = 'com.test.Conditional';
+const _badTimestampAppId = 'com.test.BadTimestamp';
 
 const _flatpakInfo = GLib.build_filenamev(['..', 'tests', 'content', '.flatpak-info']);
 const _flatpakInfoOld = GLib.build_filenamev(['..', 'tests', 'content', '.flatpak-info.old']);
@@ -165,6 +166,21 @@ describe('Model', function() {
 
         const appIds = applicationsDefault.getAll().map(a => a.appId);
         expect(appIds).not.toContain(_baseAppId);
+    });
+
+    it('handles out-of-range appdata release timestamp', function() {
+        /* A malformed app can ship a metainfo.xml whose release timestamp
+         * overflows JS Date; parsing it must not throw, otherwise a single
+         * such app breaks enumeration of every application. */
+        expect(function() {
+            applicationsDefault.getAll();
+        }).not.toThrow();
+
+        const appIds = applicationsDefault.getAll().map(a => a.appId);
+        expect(appIds).toContain(_badTimestampAppId);
+
+        const appdata = applicationsDefault.getAppDataForAppId(_badTimestampAppId);
+        expect(appdata.date).toEqual('Unknown');
     });
 
     it('loads permissions', function() {
