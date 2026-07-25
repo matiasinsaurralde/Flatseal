@@ -33,6 +33,13 @@ unconditionally `negate()`s "removed" originals with no `isNegated`/`_overrides`
 HAS this guard; filesystemsOther lost it). Reproduced end-to-end against the real source by two
 independent agents. See ★ E1 below.
 
+IMPORTANT calibration: E1 is a *confused-deputy* — it is NOT a novel way to steal files. Any app can read
+`~/.ssh` unconditionally just by declaring `filesystems=home` in its manifest (baseline Flatpak, no bug).
+E1's distinct value is only (a) gaining access the manifest never DISCLOSED (it declares `!~/.ssh`) and
+(b) DEFEATING a user's deliberate revocation — and both are CONDITIONAL on the victim using Flatseal on
+that app. Realistic severity: MEDIUM in practice, HIGH as a "security tool does the opposite of intent"
+correctness defect.
+
 **Supporting DoS chains:** C1 (AppStream `<release timestamp>` overflow → uncaught `RangeError` →
 Flatseal fails to open — persistent windowless startup DoS from one installed app) and C4 (unbounded
 launchable/appdata file read → memory-exhaustion DoS at startup). C3 is a bounded path-traversal read.
@@ -177,8 +184,21 @@ escape for user data. NOTE (Flatpak semantics, corrected): flatpak IGNORES reque
 3. The user makes ANY unrelated change (toggle network, add an env var). → the override is silently
    rewritten to `filesystems=~/.ssh`. UI still shows nothing. The app regains the access the user revoked.
 
-**Severity: HIGH.** Silent (two-step) or one careless click (one-step), persistent, and it defeats the
-exact security guarantee Flatseal exists to provide. CONFIRMED by two independent faithful reproductions
+**Honest severity calibration (baseline comparison).** A malicious app can read `~/.ssh` / any user file
+with NO Flatseal bug at all, simply by declaring `filesystems=home` (or `~/.ssh`/`host`) in its own
+manifest — that access is granted unconditionally at install time (`~/.ssh` is not reserved and not
+excluded from `home`). So E1 is NOT a novel unconditional path to file theft. E1's genuine, non-baseline
+value is narrower and CONDITIONAL on the victim using Flatseal on that app: (1) it yields access the app
+never DISCLOSED (manifest declares `!~/.ssh`, so install-time review/rating and the permission prompt see
+a self-denial) — evading the disclosure control; and (2) it DEFEATS a user's deliberate revocation (the
+security tool grants what the user tried to deny). If the victim never opens that app in Flatseal, E1
+never fires and the `!X`-declaring app has no access. Realistic rating: MEDIUM in practice (confused-deputy
+gated on Flatseal interaction), HIGH as a correctness defect for a security tool (it does the opposite of
+the user's explicit intent). The two-step (defeat-revocation) framing is the strongest; the one-step relies
+on the user choosing to remove a deny-row, which an attacker who simply wanted the grant would not need.
+
+**Severity: genuine defect, preconditioned (see calibration above).** Silent (two-step) or one careless
+click (one-step), persistent, and it defeats the exact security guarantee Flatseal exists to provide. CONFIRMED by two independent faithful reproductions
 (mine: `scratchpad/verify_escalation.js`; adversarial re-verify: `scratchpad/adv_verify*.js`) driving the
 real `permissions.js` `_setup`→`_updateModels`→`_saveOverrides` lifecycle to a final on-disk override of
 `[Context]\nfilesystems=~/.ssh` (or `/`). Adversarial refutation attempts (routing collapse, display
