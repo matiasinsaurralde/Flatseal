@@ -454,6 +454,27 @@ VAR_REGEXP to forbid `;` in values, or don't split values.
   SIGABRT/SIGSEGV. Only residual: a BOUNDED transient main-thread UI freeze (synchronous decode) —
   PLAUSIBLE, low. So no hard crash and no unbounded DoS via icons on the shipped runtime.
 
+## Sandbox-escape analysis of C3 / C4 / R1 (do they escalate beyond their stated impact?)
+
+"Escape" here means either (a) code execution in Flatseal's process (→ abuse its `overrides:create` to
+rewrite any app's sandbox) or (b) manufacturing a permission the app did not already have. None of these
+three reach either — only E1 manufactures a grant.
+
+- **C3 (launchable traversal) — NO.** Pure READ (surfaces only an icon name). `../`/symlinks resolve inside
+  Flatseal's OWN mount namespace (only `…/flatpak/app` ro, `…/overrides`, and the runtime) — host `/etc`,
+  `/home` are not mounted, so no host secrets; a symlink to `/etc/shadow` hits the runtime's `/etc`, not the
+  host's. Nothing readable (override files, metadata, `.flatpak-info`) is a Flatseal-privilege secret. No
+  write; the desktop/AppStream parser is empirically robust → no RCE. At most low-bandwidth info disclosure
+  within already-readable trees.
+- **C4 (unbounded read → memory exhaustion) — NO.** A crash/OOM removes capability, it doesn't gain any.
+  Failure is OOM or a `g_realloc`-failure `abort()` (dead process), not code execution. GString uses 64-bit
+  lengths and grows via realloc → no integer-overflow/heap-overflow path (would need a ~16-EB file). DoS
+  only.
+- **R1 (race drops user's edit) — NO.** A reload can NEVER fabricate a positive grant (originals are never
+  serialized). R1 only DROPS a `!X` negation, so the app keeps permission `X` that it ALREADY declared in
+  its own metadata — it gains nothing beyond its manifest. Defeats a revocation (trust/correctness bug),
+  not an escape.
+
 ## Ruled out (so far)
 
 - **pathRow.js regexes (`_pathRE`, `_optionRE`) ReDoS** — reconstructed exactly and fuzzed in node
