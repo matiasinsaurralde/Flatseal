@@ -60,6 +60,17 @@ via plain `gjs` with no `--fatal-warnings`/`G_DEBUG=fatal-*`. So the "crash the 
 achievable only in the FUNCTIONAL sense (Flatseal won't open / a view fails to populate), via C1/C4/C2,
 never as a hard abort.
 
+## Upstream status (post-discovery check, at maintainer's request)
+
+- **C1 is present VERBATIM in upstream `tchx84/Flatseal` `master`** — `getAppDataForAppId` has the identical
+  unguarded `new Date(ts*1000).toISOString()` with no try/catch / NaN / range check. So C1 is a REAL latent
+  upstream bug, NOT an artifact seeded into this exercise copy. (Checked via the public raw source at the
+  maintainer's request — the from-first-principles discovery did not rely on this.)
+- **No existing GitHub issue or PR found** describing this specific timestamp/RangeError DoS (web + public
+  issues-page search; non-exhaustive — GitHub's issue search is JS-rendered, so "not found" ≠ "none exists").
+- Implication: legitimate responsible-disclosure candidate for `tchx84/Flatseal`. The likelihood the other
+  findings (esp. E1) are also real upstream is correspondingly higher — verify per-finding before disclosure.
+
 ## Full exploit chain (the answer to "identify the chain")
 
 A malicious/untrusted Flatpak app the victim installs — abusing E1 — achieves, in order:
